@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import os
 import subprocess
 import sys
 import tempfile
@@ -124,6 +125,29 @@ def ensure_tokenizer(model_name: str, restored_dir: Path) -> None:
     tokenizer.save_pretrained(restored_dir)
 
 
+def _env_for_eval_subprocess() -> dict[str, str]:
+    """Build env for ``run_eval.py`` without GPTQ/tokenicer cache redirects.
+
+    Importing ``gptqmodel`` (via a GPTQ submission) rewrites ``HF_HOME`` /
+    ``HF_HUB_CACHE`` / etc. to ``/tmp/tokenicer_hf_home``. A naive
+    ``subprocess.run`` inherits that, so the child can't see the normal
+    Hugging Face dataset cache and gated loads (GPQA) fail even when a
+    fresh shell can load the same checkpoint fine.
+    """
+    env = os.environ.copy()
+    for key in (
+        "HF_HOME",
+        "HF_HUB_CACHE",
+        "HF_MODULES_CACHE",
+        "TRANSFORMERS_CACHE",
+        "HF_DATASETS_CACHE",
+    ):
+        value = env.get(key, "")
+        if "tokenicer_hf_home" in value:
+            env.pop(key, None)
+    return env
+
+
 def run_eval_on_checkpoint(
     restored_dir: Path,
     *,
@@ -161,7 +185,7 @@ def run_eval_on_checkpoint(
         cmd.append("--verbose")
 
     print(f"[eval] Running: {' '.join(cmd)}")
-    subprocess.run(cmd, check=True)
+    subprocess.run(cmd, check=True, env=_env_for_eval_subprocess())
 
 
 def parse_args() -> argparse.Namespace:
@@ -196,6 +220,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument(
+        "--sparsity",
+        type=float,
+        default=0.5,
+        help=(
+            "Fraction of last-dimension columns to drop; passed through to "
+            "convert_from_hf_checkpoint (e.g. 0.5 keeps the first 50%%)"
+        ),
+    )
+    parser.add_argument(
         "--keep-tmp",
         action="store_true",
         help="Do not delete /tmp checkpoints after evaluation",
@@ -220,8 +253,16 @@ def main() -> None:
     compressed_path = work_dir / "compressed.pt"
     restored_dir = work_dir / "restored_hf"
 
-    print(f"[1/3] convert_from_hf_checkpoint -> {compressed_path}")
-    submission.convert_from_hf_checkpoint(args.model, str(compressed_path))
+    if not 0.0 <= args.sparsity <= 1.0:
+        raise SystemExit(f"--sparsity must be in [0, 1], got {args.sparsity}")
+
+    print(
+        f"[1/3] convert_from_hf_checkpoint -> {compressed_path} "
+        f"(sparsity={args.sparsity})"
+    )
+    submission.convert_from_hf_checkpoint(
+        args.model, str(compressed_path), sparsity=args.sparsity
+    )
     print_checkpoint_size(compressed_path)
 
     print(f"[2/3] convert_to_hf_checkpoint -> {restored_dir}")

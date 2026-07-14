@@ -1,4 +1,4 @@
-"""Sample submission: compress / restore HF checkpoints byhalving last dims."""
+"""Sample submission: compress / restore HF checkpoints by sparsifying last dims."""
 
 from __future__ import annotations
 
@@ -8,11 +8,12 @@ import torch
 from transformers import AutoModelForCausalLM
 
 
-def _chop_last_dim(tensor: torch.Tensor) -> torch.Tensor:
-    """Keep the first half of ``tensor`` along its last dimension."""
+def _chop_last_dim(tensor: torch.Tensor, sparsity: float) -> torch.Tensor:
+    """Keep the first ``(1 - sparsity)`` fraction of ``tensor`` along its last dim."""
     if tensor.ndim == 0 or tensor.shape[-1] < 2:
         return tensor.detach().cpu().contiguous()
-    keep = tensor.shape[-1] // 2
+    keep = round(tensor.shape[-1] * (1.0 - sparsity))
+    keep = max(0, min(keep, tensor.shape[-1]))
     return tensor[..., :keep].detach().cpu().contiguous()
 
 
@@ -30,8 +31,12 @@ def _pad_last_dim(tensor: torch.Tensor, target_last_dim: int) -> torch.Tensor:
     return torch.nn.functional.pad(tensor, (0, pad))
 
 
-def convert_from_hf_checkpoint(model_name: str, output_path: str) -> None:
-    """Load an HF model, chop half of each weight's last dim, and save.
+def convert_from_hf_checkpoint(
+    model_name: str,
+    output_path: str,
+    sparsity: float = 0.5,
+) -> None:
+    """Load an HF model, drop a fraction of each weight's last dim, and save.
 
     Parameters
     ----------
@@ -39,9 +44,14 @@ def convert_from_hf_checkpoint(model_name: str, output_path: str) -> None:
         Hugging Face model id or local path (e.g. ``Qwen/Qwen3-4B-Instruct-2507``).
     output_path:
         Where to write the compressed ``state_dict`` (``torch.save`` file).
+    sparsity:
+        Fraction of last-dimension columns to discard. The kept slice is the
+        first ``round((1 - sparsity) * last_dim)`` columns (e.g. ``0.5`` keeps
+        the first half). Only that slice is stored.
 
-    Remark: This is where your logic of compression goes. This sample code just chops half
-        of the last dimension of the weights.
+    Remark: This is where your logic of compression goes. This sample code just
+        keeps the leading ``(1 - sparsity)`` fraction of each weight's last
+        dimension.
     """
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
@@ -53,13 +63,14 @@ def convert_from_hf_checkpoint(model_name: str, output_path: str) -> None:
 
     compressed: dict[str, torch.Tensor] = {}
     for name, tensor in state_dict.items():
-        compressed[name] = _chop_last_dim(tensor)
+        compressed[name] = _chop_last_dim(tensor, sparsity)
 
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {
             "model_name": model_name,
+            "sparsity": sparsity,
             "state_dict": compressed,
         },
         out,
@@ -76,12 +87,12 @@ def convert_to_hf_checkpoint(
     checkpoint_path: str,
     output_path: str,
 ) -> None:
-    """Restore a chopped checkpoint into a full HF model directory.
+    """Restore a sparsified checkpoint into a full HF model directory.
 
     Loads ``model_name`` for the original parameter shapes, reads the compressed
     checkpoint produced by :func:`convert_from_hf_checkpoint`, pads the missing
-    half of each last dimension with zeros, and writes a standard HF checkpoint
-    under ``output_path`` via ``save_pretrained``.
+    portion of each last dimension with zeros, and writes a standard HF
+    checkpoint under ``output_path`` via ``save_pretrained``.
 
     Parameters
     ----------
