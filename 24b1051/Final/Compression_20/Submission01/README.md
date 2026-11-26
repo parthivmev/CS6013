@@ -29,3 +29,17 @@ HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 uv run python decompress.py --model_name
 ```
 
 The decoder reconstructs all tensors as BF16 safetensors in the original two-shard Hugging Face layout and writes the index plus required tokenizer, processor, template, and config files.
+
+Block integrity uses `sha256_domain` (`raw` or `compressed`) at block level,
+falling back to the container-level field when present. Untagged v1 blocks
+support exactly the two verified historical conventions: the published checkpoint
+stores SHA256 of decoded bytes, while the original submitted writer stored SHA256
+of compressed bytes. Either convention still requires an exact digest match, the
+declared decoded length, and a complete single zlib stream without trailing data.
+Newly written blocks explicitly declare `sha256_domain: compressed`.
+
+Run integrity and failure-cleanup regressions in the submission environment:
+
+```bash
+uv run python -m unittest discover -s tests -v
+```

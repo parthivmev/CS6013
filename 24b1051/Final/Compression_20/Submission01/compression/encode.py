@@ -93,7 +93,7 @@ def _write_zlib_block(handle, producer, *, role: str, dtype: str, shape: list[in
     return {
         "codec": "zlib", "component_shape": shape, "dtype": dtype,
         "offset": offset, "raw_size": raw_size, "role": role,
-        "sha256": digest.hexdigest(), "size": compressed_size,
+        "sha256": digest.hexdigest(), "sha256_domain": "compressed", "size": compressed_size,
     }
 
 

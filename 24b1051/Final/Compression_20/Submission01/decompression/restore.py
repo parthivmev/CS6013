@@ -54,8 +54,9 @@ def _raw_producer(container: Container, entry: dict, temporary: Path):
 def _packed_producer(container: Container, entry: dict, temporary: Path):
     blocks = {block["role"]: block for block in entry["blocks"]}
     qpath = container.extract(blocks["qweight"], temporary)
-    spath = container.extract(blocks["scales"], temporary)
+    spath = None
     try:
+        spath = container.extract(blocks["scales"], temporary)
         packed = np.memmap(qpath, mode="r", dtype="u1")
         scale_words = np.memmap(spath, mode="r", dtype="<u2")
         scales = bf16_to_f32(np.asarray(scale_words))
@@ -88,7 +89,8 @@ def _packed_producer(container: Container, entry: dict, temporary: Path):
             raise ValueError(f"decoded element count mismatch for {entry['name']}")
     finally:
         qpath.unlink(missing_ok=True)
-        spath.unlink(missing_ok=True)
+        if spath is not None:
+            spath.unlink(missing_ok=True)
 
 
 def restore(checkpoint_path: str | Path, output_path: str | Path) -> None:
@@ -98,12 +100,15 @@ def restore(checkpoint_path: str | Path, output_path: str | Path) -> None:
     output.mkdir(parents=True, exist_ok=True)
     temporary = output / ".decompress_tmp"
     temporary.mkdir(exist_ok=True)
-    _copy_metadata(container, checkpoint, output)
     tensors = container.header["tensors"]
     shards = sorted({entry["original_shard"] for entry in tensors})
     weight_map = {}
     total_size = 0
+    created = []
+    partial = output / "model.safetensors.index.json.partial"
+    complete_partial = output / "DECOMPRESSION_COMPLETE.json.partial"
     try:
+        _copy_metadata(container, checkpoint, output)
         for shard in shards:
             entries = [entry for entry in tensors if entry["original_shard"] == shard]
             specs = [(entry["name"], "BF16", [int(v) for v in entry["shape"]]) for entry in entries]
@@ -119,13 +124,21 @@ def restore(checkpoint_path: str | Path, output_path: str | Path) -> None:
                 else:
                     raise ValueError(f"unsupported tensor mode {entry['mode']}")
             write_streaming(output / shard, specs, producers)
+            created.append(output / shard)
         index = {"metadata": {"total_size": total_size}, "weight_map": weight_map}
-        partial = output / "model.safetensors.index.json.partial"
         partial.write_text(json.dumps(index, indent=2) + "\n", encoding="utf-8")
         os.replace(partial, output / "model.safetensors.index.json")
-        (output / "DECOMPRESSION_COMPLETE.json").write_text(
+        created.append(output / "model.safetensors.index.json")
+        complete_partial.write_text(
             json.dumps({"format": container.header["format"], "tensor_count": len(tensors), "dtype": "bfloat16"}, indent=2) + "\n",
             encoding="utf-8",
         )
+        os.replace(complete_partial, output / "DECOMPRESSION_COMPLETE.json")
+    except BaseException:
+        for path in created:
+            path.unlink(missing_ok=True)
+        raise
     finally:
+        partial.unlink(missing_ok=True)
+        complete_partial.unlink(missing_ok=True)
         shutil.rmtree(temporary, ignore_errors=True)
